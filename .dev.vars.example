@@ -1,0 +1,6 @@
+# Copy to .dev.vars and fill in. The server loads these via dotenv.
+# An LLM provider key is the only hard requirement; individual lessons note
+# any extra services they need.
+
+GOOGLE_GENERATIVE_AI_API_KEY=your-key-here
+# or: GEMINI_API_KEY=your-key-here

@@ -1,0 +1,135 @@
+StartDate: 2026-06-12
+EndDate: 2026-06-12
+
+Title: Harness Engineering & Agent Orchestration
+Subtitle: Stop building scripts. Start building durable multi-agent systems.
+
+Teachers:
+  - moss
+
+Excerpt: >
+  Move beyond basic while-loops and API wrappers. In one day you build a mini agent
+  runtime from scratch — the harness — the layer that makes an LLM loop durable, isolated,
+  memory-aware, and coordinated. Not "build an agent." Build the thing that can durably
+  run any of them.
+
+Benefits:
+  - "The Agent Harness: Build the middleware that owns state, events, tools, policies, and observability — the harness is the app, not the model."
+  - "Durable Execution: Add an event log, checkpointing, and resume so a crash or rate limit picks up exactly where it left off, with no duplicate side effects."
+  - "Runtime Sandboxing: Make the harness the security boundary — execute model-written code in an isolated runtime with timeouts, limits, and policy guards."
+  - "Memory & Context Hydration: Separate state, history, and context; hydrate the right tokens on demand and summarize stale history to keep the window clean."
+  - "Routing & Handoffs: Treat routing as a control-plane decision and handoffs as typed state transfer between specialist agents."
+  - "Supervision: Fan out isolated sub-agents in parallel, collect typed results, and synthesize — while surviving partial failure."
+  - "Human-in-the-Loop: Make approval a first-class, durable workflow state with suspend/resume that survives unbounded waits."
+
+Summary: >
+  This is a systems workshop, not an "agent app" workshop. Instead of building one large
+  vertical project, you build a small but real agent harness: a runtime that executes agent
+  steps, checkpoints state, isolates tools, hydrates context, routes between agents, supervises
+  parallel work, and suspends/resumes for human approval. The agent itself is intentionally
+  boring — a domain-neutral task agent — because the harness is the protagonist. Every lesson
+  follows the same rhythm: name a production failure mode, watch the naive agent fail, then
+  live-code the one harness capability that fixes it and watch it survive. By the end you
+  understand the layer that LangGraph, Mastra, Temporal, and the agent SDKs provide — because
+  you built the tiny version yourself.
+
+Audience:
+  Overview:
+    - Full-stack JS/TS developers transitioning into AI systems architecture.
+    - Engineers who have built basic agents and want to learn how to make them fault-tolerant and scalable.
+    - Technical leads needing to understand the orchestration and infrastructure layers of modern AI applications.
+  Prerequisites:
+    - Comfortable with TypeScript and Node.js.
+    - Basic understanding of LLM APIs and standard agent loops (receive message → think → act → respond).
+    - Familiarity with asynchronous programming and API integrations.
+
+# ─────────────────────────────────────────────
+#  DAY 1 — "Build the Harness"
+# ─────────────────────────────────────────────
+#
+#  We build ONE persistent codebase: a mini agent runtime. Each lesson adds
+#  one capability to the runtime around a deliberately boring task agent.
+#
+#  Repeatable lesson rhythm (matters most for the VOD):
+#    1. Name the production failure mode
+#    2. Show the naive agent fail, live
+#    3. Live-code the harness module that fixes it
+#    4. Re-run, watch it survive
+#    5. Map it to the real production tool
+#
+#  The spine of the whole day:
+#    state = stateStore.load()           → hydrateContext (L4)
+#    step  = agent.next(context)          → policy.check (L3/L7)
+#    eventLog.append(step) (L2)           → executeStep → checkpoint (L2)
+#
+# ─────────────────────────────────────────────
+
+Schedule:
+  # ── Morning — The Harness Core ─────────────
+
+  # Lesson 1 — The Agent Harness
+  #   Failure: a demo agent is a while-loop with an LLM in it; dies seven ways.
+  #   Capability: the runtime skeleton — middleware that owns state, events,
+  #   tools, policies, observability, and emits the event stream the inspector renders.
+  #   Scenario: introduce the domain-neutral task packet + safe/dangerous tools.
+  #
+  - 0930: "Intro to Harness Engineering"
+
+  - 1015: "Break"
+
+  # Lesson 2 — Durable Execution & State Persistence
+  #   Failure: kill the process after a side effect → lost state, re-billed LLM, duplicate action.
+  #   Capability: append-only EventLog + StateStore.checkpoint() + runtime.resume()
+  #   with idempotency. The emotional center of the course.
+  #
+  - 1025: "Durable Execution & State Persistence"
+
+  - 1115: "Break"
+
+  # Lesson 3 — Secure Sandboxing & Runtime Isolation
+  #   Failure: the model asks to run dangerous code; an unsandboxed tool just runs it.
+  #   Capability: a sandboxed runCode (timeout/limits/isolation) + a ToolPolicy guarding
+  #   every call; structured errors enable self-correction. The harness is the security boundary.
+  #
+  - 1125: "Secure Sandboxing & Runtime Isolation"
+
+  # ── Lunch Break ────────────────────────────
+  - 1200: "Lunch"
+
+  # ── Afternoon — The Control Plane ──────────
+
+  # Lesson 4 — Advanced Memory & Context Hydration
+  #   Failure: appending everything to messages bloats context → dumb and expensive.
+  #   Capability: separate State / History / Context; a ContextHydrator + memory store
+  #   (working/summaries/facts) + a summarizer. Context is a runtime decision, not a chat log.
+  #
+  - 1300: "Advanced Memory Infrastructure"
+
+  - 1350: "Break"
+
+  # Lesson 5 — Orchestration: Routing & Handoffs
+  #   Failure: one overloaded agent picks wrong tools and conflates intents.
+  #   Capability: a Router (deterministic rules → LLM fallback → human escalation) and
+  #   typed Handoff payloads to specialist agents with limited toolsets.
+  #
+  - 1400: "Orchestration: Routing & Handoffs"
+
+  - 1450: "Break"
+
+  # Lesson 6 — Multi-Agent Supervision & Hierarchical Control
+  #   Failure: parallelizable work done serially; and what happens when a sub-agent fails?
+  #   Capability: a Supervisor — fan-out to isolated sub-agents, typed result contracts,
+  #   synthesis, and degraded-result handling on partial failure. Reuses L3 + L5.
+  #
+  - 1500: "Hierarchical Supervision"
+
+  - 1550: "Break"
+
+  # Lesson 7 — Human-in-the-Loop & Unbounded Pauses
+  #   Failure: awaiting a human blocks the server and dies on restart.
+  #   Capability: runtime.suspend()/resume() + an ApprovalStore + a first-class
+  #   "suspended" workflow state — durable approval that survives days. Pays off L2.
+  #
+  - 1600: "Human-in-the-Loop (HITL)"
+
+  - 1630: "End"

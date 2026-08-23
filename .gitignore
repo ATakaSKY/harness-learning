@@ -1,0 +1,14 @@
+node_modules
+dist
+.dev.vars
+.env
+.env.local
+lessons/.vitepress/cache
+lessons/.vitepress/dist
+*.log
+.DS_Store
+
+# auto-installed agent skill artifacts (not part of the course)
+.agents/
+.claude/skills/
+skills-lock.json
