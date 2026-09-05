@@ -12,11 +12,10 @@
     "resolveJsonModule": true,
     "noEmit": true,
     "verbatimModuleSyntax": true,
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["web/src/*"],
-      "@shared/*": ["shared/*"]
+      "@/*": ["./web/src/*"],
+      "@shared/*": ["./shared/*"]
     }
   },
-  "include": ["server", "shared", "harness", "examples", "web"]
+  "include": ["server", "shared", "harness", "examples", "scripts", "web"]
 }
