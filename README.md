@@ -9,6 +9,9 @@ patterns that keep agents durable, isolated, memory-aware, and coordinated.
 Instead of one large cumulative project, each lesson tackles a **new architectural pattern**: you
 see it introduced, watch it live-coded in TypeScript/Node.js, and move on.
 
+New here, or coming back after a while? [ARCHITECTURE.md](./ARCHITECTURE.md) has diagrams of how the
+pieces fit together.
+
 ## What you'll learn
 
 1. **The Agent Harness** — the middleware that gives an LLM its context, tools, and guardrails.
