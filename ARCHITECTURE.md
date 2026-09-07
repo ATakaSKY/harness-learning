@@ -20,12 +20,14 @@ flowchart LR
     end
 
     subgraph SERVER["Node server — server/index.ts"]
-        WS["Express + ws on /ws<br/>the only transport"]
+        WS["Express + ws on /ws<br/>the transport that matters"]
+        HTTP["HTTP side door<br/>GET /health, POST /api/clear"]
         BOOT["DBOS.launch on boot<br/>resumes runs killed mid-flight"]
     end
 
     subgraph HARNESS["The harness — harness/ (this is the course)"]
         RUNTIME["runtime.ts<br/>agentWorkflow = the durable loop"]
+        MEMORY["memory.ts<br/>buildContext + summarize"]
         MODEL["model.ts<br/>Gemini via the AI SDK"]
         TOOLS["tools.ts<br/>tool schemas + runTool executor"]
         SANDBOX["sandbox.ts<br/>node:vm — no fs, no net, 2s timeout"]
@@ -40,8 +42,13 @@ flowchart LR
     WS -- "startWorkflow" --> RUNTIME
     WS -- "AgentEvent stream" --> SOCK
     SOCK --> INSP
+    INSP -- "Clear button" --> HTTP
+    HTTP -- "TRUNCATE event_log" --> PG
 
-    RUNTIME --> MODEL --> GEMINI
+    RUNTIME -- "hydrate the context, compact when over budget" --> MEMORY
+    MEMORY -- "one summarizer call" --> MODEL
+    RUNTIME -- "one turn over the hydrated context" --> MODEL
+    MODEL --> GEMINI
     RUNTIME -- "one tool call at a time" --> TOOLS
     TOOLS -- "runCode ONLY" --> SANDBOX
     RUNTIME -- "every step" --> BUS
@@ -53,8 +60,8 @@ flowchart LR
     classDef harness fill:#1e3a5f,stroke:#4a90d9,stroke-width:2px,color:#fff
     classDef infra fill:#2d2d2d,stroke:#888,color:#fff
     classDef ui fill:#3d2d4d,stroke:#a678c9,color:#fff
-    class RUNTIME,MODEL,TOOLS,SANDBOX,BUS harness
-    class GEMINI,PG,WS,BOOT infra
+    class RUNTIME,MEMORY,MODEL,TOOLS,SANDBOX,BUS harness
+    class GEMINI,PG,WS,HTTP,BOOT infra
     class TASK,SOCK,INSP ui
 ```
 
@@ -65,7 +72,8 @@ Two things this diagram is trying to make obvious:
   becomes visible on screen.
 - **The socket is bidirectional and long-lived.** That's deliberate: a request-scoped transport like
   the AI SDK's `useChat` can't express server-initiated events such as a sub-agent finishing or a
-  workflow resuming days later.
+  workflow resuming days later. The HTTP routes are housekeeping only — a health check and the
+  inspector's Clear button, which truncates the event log so you can start a demo from empty.
 
 ---
 
@@ -89,8 +97,15 @@ sequenceDiagram
     W->>DB: emit workflow.started
     DB-->>U: live event, timeline appears
 
-    loop up to MAX_STEPS = 10
-        W->>M: streamText with messages + tool schemas
+    loop up to MAX_STEPS = 30
+        opt recent turns are over the token budget
+            W->>M: summarize the oldest turns
+            M-->>W: updated running summary
+            W->>DB: checkpoint summarize-N, emit memory.compacted
+        end
+
+        W->>W: buildContext = system + pinned task + summary + recent turns
+        W->>M: streamText over the HYDRATED context + tool schemas
         M-->>W: streamed text, then any tool calls
         W->>DB: checkpoint step model-N
         Note over W,U: each token becomes a model.delta event
@@ -100,16 +115,18 @@ sequenceDiagram
             W->>T: runTool with name and args
             T-->>W: result
             W->>DB: checkpoint step tool-abc123
-            W->>W: append the result to messages, loop again
+            W->>W: collect results into this turn, push the turn, loop again
         else the model answered with no tool calls
             W->>DB: emit model.completed, then workflow.completed
         end
     end
 ```
 
-The loop is a plain `while` — that's the point. The interesting part is that every non-deterministic
-thing (the model, the tools, the clock) is wrapped in a DBOS step, so the workflow body itself can
-be safely re-run from the top on recovery while completed steps are served from their checkpoints.
+The loop is a plain `while` — that's the point. Two things make it a runtime rather than a script.
+Every non-deterministic thing (the model, the tools, the summarizer) is wrapped in a DBOS step, so
+the workflow body can be safely re-run from the top on recovery while completed steps are served
+from their checkpoints. And the loop no longer accumulates one ever-growing `messages` array: it
+keeps a list of **turns** plus a running summary, and rebuilds the context from scratch each pass.
 
 ---
 
@@ -125,7 +142,7 @@ stateDiagram-v2
     Running --> Crashed: process killed, rate limit, deploy
     Crashed --> Running: next DBOS.launch recovers and skips completed steps
     Running --> Completed: model answers with no tool calls
-    Running --> Failed: hit the 10-step cap
+    Running --> Failed: hit the 30-step cap
     Completed --> [*]
     Failed --> [*]
 ```
@@ -174,20 +191,62 @@ strong that boundary is becomes a deployment choice (e2b, Cloudflare Sandbox SDK
 
 ---
 
-## 5. The seven lessons, as modules
+## 5. Memory: what the model actually sees
+
+Lesson 4's move: stop equating the conversation with the context window. `harness/memory.ts` keeps
+three things apart, and assembles the third one fresh on every pass of the loop.
+
+```mermaid
+flowchart LR
+    subgraph SPLIT["Three different things, on purpose"]
+        HIST["HISTORY<br/>everything that happened<br/>the Postgres event_log"]
+        STATE["STATE<br/>running summary of old turns"]
+        RECENT["RECENT TURNS<br/>the newest ones, verbatim"]
+    end
+
+    BUDGET["Over MAX_CONTEXT_TOKENS = 500?<br/>peel the oldest turns until back<br/>under KEEP_CONTEXT_TOKENS = 200"]
+    CTX["buildContext<br/>system prompt + pinned task<br/>+ summary + recent turns"]
+    SEEN["What Gemini sees this turn<br/>roughly flat token count<br/>however long the task runs"]
+
+    RECENT --> BUDGET
+    BUDGET -- "summarize: an LLM call,<br/>checkpointed as its own DBOS step" --> STATE
+    STATE --> CTX
+    RECENT --> CTX
+    CTX --> SEEN
+    HIST -. "never sent to the model —<br/>replayed to the inspector instead" .-> SEEN
+
+    classDef keep fill:#1e3a5f,stroke:#4a90d9,stroke-width:2px,color:#fff
+    classDef cold fill:#2d2d2d,stroke:#888,color:#ccc
+    class STATE,RECENT,CTX,SEEN keep
+    class HIST,BUDGET cold
+```
+
+Details worth remembering when you reread this:
+
+- **The budget is tokens, not turn count.** A turn count breaks the moment the model batches ten
+  tool calls into one turn. The estimate is a rough 4-chars-per-token, and the thresholds are
+  deliberately tiny so compaction visibly fires during a short workshop demo.
+- **The task is pinned.** The original input is re-added to every context and never summarized away,
+  so the agent can't forget the goal after compaction.
+- **Summarizing is itself a durable step.** A crash won't re-summarize or re-pay for it, and the
+  `memory.compacted` event puts the whole thing on the inspector timeline.
+
+---
+
+## 6. The seven lessons, as modules
 
 Each lesson adds one module to the same runtime. Solid = on `main` today, dashed = later lessons.
 
 ```mermaid
 flowchart TD
-    subgraph BUILT["Built — morning, the harness core"]
+    subgraph BUILT["Built"]
         L1["L1 Intro to Harness Engineering<br/>runtime.ts, tools.ts, bus.ts, shared/events.ts<br/>fixes: a demo agent is a while-loop that dies seven ways"]
         L2["L2 Durable Execution<br/>db.ts, DBOS steps<br/>fixes: crash loses state, re-bills the LLM, double-sends"]
         L3["L3 Secure Sandboxing<br/>sandbox.ts, runCode<br/>fixes: model-written code runs unmediated"]
+        L4["L4 Memory and Context Hydration<br/>memory.ts, buildContext + summarize<br/>fixes: appending everything bloats the context window"]
     end
 
-    subgraph TODO["Planned — afternoon, the control plane"]
-        L4["L4 Memory and Context Hydration<br/>memory.ts<br/>fixes: appending everything bloats the context window"]
+    subgraph TODO["Planned — the rest of the control plane"]
         L5["L5 Routing and Handoffs<br/>router.ts<br/>fixes: one overloaded agent conflates intents"]
         L6["L6 Hierarchical Supervision<br/>supervisor.ts<br/>fixes: parallel work done serially, partial failure"]
         L7["L7 Human-in-the-Loop<br/>approvals.ts<br/>fixes: waiting on a human blocks and dies on restart"]
@@ -197,34 +256,35 @@ flowchart TD
 
     classDef built fill:#1e3a5f,stroke:#4a90d9,stroke-width:2px,color:#fff
     classDef planned fill:#2d2d2d,stroke:#888,stroke-dasharray:5 3,color:#ccc
-    class L1,L2,L3 built
-    class L4,L5,L6,L7 planned
+    class L1,L2,L3,L4 built
+    class L5,L6,L7 planned
 ```
 
-`shared/events.ts` already declares the event types for all seven lessons — memory compaction,
-handoffs, plans, sub-agents, approvals. Reading that enum top to bottom is the fastest way to see
-where the course is going.
+`shared/events.ts` already declares the event types for all seven lessons — handoffs, plans,
+sub-agents, approvals. Reading that enum top to bottom is the fastest way to see where the course
+is going.
 
 ---
 
-## 6. File map
+## 7. File map
 
 | Path | What it is |
 |---|---|
 | `harness/runtime.ts` | The durable agent loop. The spine of the whole course |
+| `harness/memory.ts` | Token budget, `buildContext` hydration, and the summarizer |
 | `harness/bus.ts` | `emit` writes the event to Postgres, then fans it out to listeners |
-| `harness/db.ts` | Drizzle + postgres.js; owns the `event_log` table |
+| `harness/db.ts` | Drizzle + postgres.js; owns the `event_log` table and clears it |
 | `harness/tools.ts` | Tool schemas the model sees, plus the harness-owned `runTool` executor |
 | `harness/sandbox.ts` | `node:vm` isolation for model-written code |
 | `harness/model.ts` | The single place the Gemini model is configured |
-| `harness/system-prompt.ts` | The triage instructions and the sample task |
+| `harness/system-prompt.ts` | The triage instructions and the five-item sample task |
 | `shared/events.ts` | `AgentEvent` — the contract between harness and UI |
-| `server/index.ts` | Express + ws, DBOS launch and recovery, `submit_task` handling |
+| `server/index.ts` | Express + ws, DBOS launch and recovery, `submit_task`, `/api/clear` |
 | `web/` | The prebuilt inspector. Renders events, never calls the harness directly |
 | `lessons/` | VitePress notes, one folder per lesson |
 | `scripts/` | `test-sandbox.ts` and `inspect-log.ts` — poke at pieces in isolation |
 
-## 7. Running it
+## 8. Running it
 
 ```bash
 npm run dev        # harness server on :8787 + inspector on :5173

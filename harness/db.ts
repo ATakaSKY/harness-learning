@@ -33,3 +33,9 @@ export async function ensureSchema(): Promise<void> {
     )
   `;
 }
+
+// Wipe the durable log (the "Clear" button in the inspector). Wired up in the
+// memory lesson.
+export async function clearEventLog(): Promise<void> {
+  await client`TRUNCATE event_log`;
+}
