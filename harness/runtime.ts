@@ -10,6 +10,8 @@ import {
   buildContext,
   summarize,
   estimateTokens,
+  estimateHydratedTokens,
+  type HydratedContext,
   MAX_CONTEXT_TOKENS,
   KEEP_CONTEXT_TOKENS,
 } from "./memory";
@@ -33,10 +35,15 @@ type Turn = {
 // One model turn over the hydrated context, using the CURRENT agent's tools.
 async function modelTurn(
   workflowId: string,
-  context: ModelMessage[],
+  context: HydratedContext,
   agentTools: ToolSet,
 ): Promise<Turn> {
-  const result = streamText({ model, messages: context, tools: agentTools });
+  const result = streamText({
+    model,
+    system: context.system,
+    messages: context.messages,
+    tools: agentTools,
+  });
 
   for await (const part of result.fullStream) {
     if (part.type === "text-delta") {
@@ -133,7 +140,7 @@ async function agentWorkflow(input: string): Promise<string> {
         summary = await DBOS.runStep(() => summarize(old, summary), {
           name: `summarize-${step}`,
         });
-        const contextTokens = estimateTokens(
+        const contextTokens = estimateHydratedTokens(
           buildContext(currentAgent.systemPrompt, input, summary, turns),
         );
         await DBOS.runStep(

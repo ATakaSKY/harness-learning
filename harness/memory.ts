@@ -27,6 +27,14 @@ export function estimateTokens(messages: ModelMessage[]): number {
 //   · STATE    = a running SUMMARY of older turns (compacted working memory).
 //   · CONTEXT  = what the model actually sees THIS turn, assembled on demand.
 //
+// Gemini (via AI SDK) allows system content only via the top-level `system`
+// option — not as mid-conversation `role: "system"` messages. We merge the
+// compaction summary into that single system string.
+export type HydratedContext = {
+  system: string;
+  messages: ModelMessage[];
+};
+
 // buildContext hydrates the context: the system prompt, the pinned task, the
 // summary of old work, and only the most recent turns verbatim.
 export function buildContext(
@@ -34,19 +42,23 @@ export function buildContext(
   task: string,
   summary: string,
   turns: ModelMessage[][],
-): ModelMessage[] {
-  const context: ModelMessage[] = [
-    { role: "system", content: systemPrompt },
+): HydratedContext {
+  const system = summary
+    ? `${systemPrompt}\n\nSummary of earlier work so far:\n${summary}`
+    : systemPrompt;
+
+  const messages: ModelMessage[] = [
     { role: "user", content: task }, // the goal is pinned, never summarized away
   ];
-  if (summary) {
-    context.push({
-      role: "system",
-      content: `Summary of earlier work so far:\n${summary}`,
-    });
-  }
-  for (const turn of turns) context.push(...turn); // recent turns, verbatim
-  return context;
+  for (const turn of turns) messages.push(...turn); // recent turns, verbatim
+  return { system, messages };
+}
+
+export function estimateHydratedTokens(ctx: HydratedContext): number {
+  return estimateTokens([
+    { role: "system", content: ctx.system },
+    ...ctx.messages,
+  ]);
 }
 
 // Compress old turns into the running summary. This is an LLM call, so in the
@@ -67,12 +79,9 @@ export async function summarize(
 
   const { text } = await generateText({
     model,
+    system:
+      "You compress an agent's work log into a short running summary. Preserve concrete facts: item ids, categories, draft ids, amounts, and what was already sent. Be terse.",
     messages: [
-      {
-        role: "system",
-        content:
-          "You compress an agent's work log into a short running summary. Preserve concrete facts: item ids, categories, draft ids, amounts, and what was already sent. Be terse.",
-      },
       {
         role: "user",
         content: `Prior summary:\n${priorSummary || "(none)"}\n\nFold in this newer work:\n${transcript}\n\nReturn the updated summary.`,
