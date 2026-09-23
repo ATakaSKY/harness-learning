@@ -26,7 +26,8 @@ flowchart LR
     end
 
     subgraph HARNESS["The harness — harness/ (this is the course)"]
-        RUNTIME["runtime.ts<br/>agentWorkflow = the durable loop"]
+        RUNTIME["runtime.ts<br/>agentWorkflow = the durable loop<br/>intercepts handoff"]
+        AGENTS["agent.ts<br/>named agents: prompt + tools"]
         MEMORY["memory.ts<br/>buildContext + summarize"]
         MODEL["model.ts<br/>Gemini via the AI SDK"]
         TOOLS["tools.ts<br/>tool schemas + runTool executor"]
@@ -45,6 +46,7 @@ flowchart LR
     INSP -- "Clear button" --> HTTP
     HTTP -- "TRUNCATE event_log" --> PG
 
+    RUNTIME -- "current agent prompt + tools" --> AGENTS
     RUNTIME -- "hydrate the context, compact when over budget" --> MEMORY
     MEMORY -- "one summarizer call" --> MODEL
     RUNTIME -- "one turn over the hydrated context" --> MODEL
@@ -60,7 +62,7 @@ flowchart LR
     classDef harness fill:#1e3a5f,stroke:#4a90d9,stroke-width:2px,color:#fff
     classDef infra fill:#2d2d2d,stroke:#888,color:#fff
     classDef ui fill:#3d2d4d,stroke:#a678c9,color:#fff
-    class RUNTIME,MEMORY,MODEL,TOOLS,SANDBOX,BUS harness
+    class RUNTIME,AGENTS,MEMORY,MODEL,TOOLS,SANDBOX,BUS harness
     class GEMINI,PG,WS,HTTP,BOOT infra
     class TASK,SOCK,INSP ui
 ```
@@ -104,17 +106,22 @@ sequenceDiagram
             W->>DB: checkpoint summarize-N, emit memory.compacted
         end
 
-        W->>W: buildContext = system + pinned task + summary + recent turns
-        W->>M: streamText over the HYDRATED context + tool schemas
+        W->>W: buildContext → system string + messages (task + recent turns)
+        W->>M: streamText(system, messages, current agent's tools)
         M-->>W: streamed text, then any tool calls
         W->>DB: checkpoint step model-N
         Note over W,U: each token becomes a model.delta event
 
         alt the model asked for tools
-            W->>DB: emit tool.requested
-            W->>T: runTool with name and args
-            T-->>W: result
-            W->>DB: checkpoint step tool-abc123
+            alt handoff (control-plane — not runTool)
+                W->>DB: emit agent.handoff
+                W->>W: switch current agent, synthetic tool result
+            else any other tool
+                W->>DB: emit tool.requested
+                W->>T: runTool with name and args
+                T-->>W: result
+                W->>DB: checkpoint step tool-abc123
+            end
             W->>W: collect results into this turn, push the turn, loop again
         else the model answered with no tool calls
             W->>DB: emit model.completed, then workflow.completed
@@ -230,6 +237,34 @@ Details worth remembering when you reread this:
   so the agent can't forget the goal after compaction.
 - **Summarizing is itself a durable step.** A crash won't re-summarize or re-pay for it, and the
   `memory.compacted` event puts the whole thing on the inspector timeline.
+- **Wire format vs. concepts.** Gemini (via the AI SDK) accepts system content only at the top of a
+  call. Hydration still assembles the same four pieces — agent instructions, pinned task, summary,
+  recent turns — but maps them to `streamText({ system, messages })`: one merged `system` string
+  (prompt + summary) and `messages` that are only user / assistant / tool turns.
+
+---
+
+## 5b. Routing and handoffs (L5)
+
+Lesson 5's move: the runtime stays one loop; **specialists are data**, not new machinery. Each agent
+is a name, a system prompt, and a tool subset in `harness/agent.ts`. The model may call `handoff`;
+the harness **intercepts** that call, emits `agent.handoff`, swaps the running agent, and appends a
+synthetic tool result — same conversation, new prompt and tools on the next turn. `currentAgent` is
+rebuilt deterministically on DBOS recovery because the handoff is a cached model decision.
+
+```mermaid
+flowchart LR
+    TRIAGE["triage agent<br/>no issueRefund"]
+    HANDOFF["model calls handoff<br/>runtime intercepts"]
+    BILLING["billing agent<br/>issueRefund + stricter tools"]
+    TURNS["turns[] unchanged<br/>context re-hydrated with new system prompt"]
+
+    TRIAGE --> HANDOFF --> BILLING
+    HANDOFF --> TURNS --> BILLING
+
+    classDef harness fill:#1e3a5f,stroke:#4a90d9,stroke-width:2px,color:#fff
+    class TRIAGE,BILLING,HANDOFF,TURNS harness
+```
 
 ---
 
@@ -244,10 +279,10 @@ flowchart TD
         L2["L2 Durable Execution<br/>db.ts, DBOS steps<br/>fixes: crash loses state, re-bills the LLM, double-sends"]
         L3["L3 Secure Sandboxing<br/>sandbox.ts, runCode<br/>fixes: model-written code runs unmediated"]
         L4["L4 Memory and Context Hydration<br/>memory.ts, buildContext + summarize<br/>fixes: appending everything bloats the context window"]
+        L5["L5 Routing and Handoffs<br/>agent.ts + runtime handoff intercept<br/>fixes: one overloaded agent conflates intents"]
     end
 
     subgraph TODO["Planned — the rest of the control plane"]
-        L5["L5 Routing and Handoffs<br/>router.ts<br/>fixes: one overloaded agent conflates intents"]
         L6["L6 Hierarchical Supervision<br/>supervisor.ts<br/>fixes: parallel work done serially, partial failure"]
         L7["L7 Human-in-the-Loop<br/>approvals.ts<br/>fixes: waiting on a human blocks and dies on restart"]
     end
@@ -256,8 +291,8 @@ flowchart TD
 
     classDef built fill:#1e3a5f,stroke:#4a90d9,stroke-width:2px,color:#fff
     classDef planned fill:#2d2d2d,stroke:#888,stroke-dasharray:5 3,color:#ccc
-    class L1,L2,L3,L4 built
-    class L5,L6,L7 planned
+    class L1,L2,L3,L4,L5 built
+    class L6,L7 planned
 ```
 
 `shared/events.ts` already declares the event types for all seven lessons — handoffs, plans,
@@ -270,14 +305,15 @@ is going.
 
 | Path | What it is |
 |---|---|
-| `harness/runtime.ts` | The durable agent loop. The spine of the whole course |
+| `harness/runtime.ts` | The durable agent loop. Intercepts `handoff`. The spine of the course |
+| `harness/agent.ts` | Named agents: each is a system prompt plus an allowed tool subset |
 | `harness/memory.ts` | Token budget, `buildContext` hydration, and the summarizer |
 | `harness/bus.ts` | `emit` writes the event to Postgres, then fans it out to listeners |
 | `harness/db.ts` | Drizzle + postgres.js; owns the `event_log` table and clears it |
 | `harness/tools.ts` | Tool schemas the model sees, plus the harness-owned `runTool` executor |
 | `harness/sandbox.ts` | `node:vm` isolation for model-written code |
 | `harness/model.ts` | The single place the Gemini model is configured |
-| `harness/system-prompt.ts` | The triage instructions and the five-item sample task |
+| `harness/system-prompt.ts` | Sample task string for demos (`SAMPLE_TASK`); agent prompts live in `agent.ts` |
 | `shared/events.ts` | `AgentEvent` — the contract between harness and UI |
 | `server/index.ts` | Express + ws, DBOS launch and recovery, `submit_task`, `/api/clear` |
 | `web/` | The prebuilt inspector. Renders events, never calls the harness directly |
