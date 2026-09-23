@@ -1,6 +1,6 @@
 import { streamText } from "ai";
 import { DBOS } from "@dbos-inc/dbos-sdk";
-import type { JSONValue, ModelMessage } from "ai";
+import type { JSONValue, ModelMessage, ToolSet } from "ai";
 import { EventType } from "@shared/events";
 import { model } from "./model";
 import { runTool, tools } from "./tools";
@@ -13,6 +13,7 @@ import {
   MAX_CONTEXT_TOKENS,
   KEEP_CONTEXT_TOKENS,
 } from "./memory";
+import { agents, triageAgent } from "./agent";
 
 // A safety cap so a confused model can't loop forever. Higher than Lesson 1 now
 // that one task can span many items (and therefore many turns).
@@ -29,13 +30,13 @@ type Turn = {
   responseMessages: ModelMessage[];
 };
 
-// One model turn over the HYDRATED context (not the whole history). Run as a
-// DBOS step so a completed turn is checkpointed and never re-billed.
+// One model turn over the hydrated context, using the CURRENT agent's tools.
 async function modelTurn(
   workflowId: string,
-  messages: ModelMessage[],
+  context: ModelMessage[],
+  agentTools: ToolSet,
 ): Promise<Turn> {
-  const result = streamText({ model, messages, tools });
+  const result = streamText({ model, messages: context, tools: agentTools });
 
   for await (const part of result.fullStream) {
     if (part.type === "text-delta") {
@@ -77,15 +78,33 @@ async function toolStep(
   return output;
 }
 
-// THE DURABLE AGENT LOOP, now with bounded memory.
+function toolResultMessage(call: ToolCall, value: JSONValue): ModelMessage {
+  return {
+    role: "tool",
+    content: [
+      {
+        type: "tool-result",
+        toolCallId: call.toolCallId,
+        toolName: call.toolName,
+        output: { type: "json", value },
+      },
+    ],
+  };
+}
+
+// THE DURABLE AGENT LOOP — now a general RUNTIME that runs any agent.
 //
+// The loop is identical to before, with two additions:
+//   · it runs the CURRENT agent's prompt + tools (start: triage)
+//   · the `handoff` tool isn't executed — the harness intercepts it and SWITCHES
+//     the running agent, keeping the conversation. Control transfers laterally.
 // We keep the conversation as a list of TURNS. Each pass:
 //   1. if we have too many turns, compact the oldest into a running summary
 //   2. hydrate the context (system + task + summary + recent turns)
 //   3. run one model turn over THAT context — not the whole history
 //
-// So the tokens we send stay roughly flat no matter how long the task runs. The
-// full history still lives, durably, in the Postgres event log.
+// `currentAgent` is rebuilt deterministically on recovery (the handoff is a
+// consequence of a cached model decision), so this composes with durability.
 async function agentWorkflow(input: string): Promise<string> {
   const workflowId = DBOS.workflowID ?? "unknown";
 
@@ -94,13 +113,13 @@ async function agentWorkflow(input: string): Promise<string> {
     { name: "started" },
   );
 
+  let currentAgent = triageAgent;
   const turns: ModelMessage[][] = [];
   let summary = "";
 
   let step = 0;
   while (step < MAX_STEPS) {
-    // 1. Compact: while the recent window is over budget, peel the oldest turns
-    //    into the running summary (keeping at least the last turn verbatim).
+    // 1. Compact old turns once the window is over budget.
     if (estimateTokens(turns.flat()) > MAX_CONTEXT_TOKENS) {
       const old: ModelMessage[][] = [];
       while (
@@ -115,7 +134,7 @@ async function agentWorkflow(input: string): Promise<string> {
           name: `summarize-${step}`,
         });
         const contextTokens = estimateTokens(
-          buildContext(input, summary, turns),
+          buildContext(currentAgent.systemPrompt, input, summary, turns),
         );
         await DBOS.runStep(
           () =>
@@ -132,10 +151,18 @@ async function agentWorkflow(input: string): Promise<string> {
     }
 
     // 2 + 3. Hydrate the context and run one turn over it.
-    const context = buildContext(input, summary, turns);
-    const turn = await DBOS.runStep(() => modelTurn(workflowId, context), {
-      name: `model-${step}`,
-    });
+    const context = buildContext(
+      currentAgent.systemPrompt,
+      input,
+      summary,
+      turns,
+    );
+    const turn = await DBOS.runStep(
+      () => modelTurn(workflowId, context, currentAgent.tools),
+      {
+        name: `model-${step}`,
+      },
+    );
 
     const turnMessages: ModelMessage[] = [...turn.responseMessages];
 
@@ -158,21 +185,32 @@ async function agentWorkflow(input: string): Promise<string> {
     }
 
     for (const call of turn.toolCalls) {
-      const output = await DBOS.runStep(() => toolStep(workflowId, call), {
-        name: `tool-${call.toolCallId}`,
-      });
-      // Feed the tool result back to the model on the next turn.
-      turnMessages.push({
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: call.toolCallId,
-            toolName: call.toolName,
-            output: { type: "json", value: output as JSONValue },
-          },
-        ],
-      });
+      if (call.toolName === "handoff") {
+        // The harness intercepts handoff: switch the running agent, don't run a tool.
+        const to = String(call.input.to ?? "");
+        const reason = String(call.input.reason ?? "");
+        const from = currentAgent.name;
+        await DBOS.runStep(
+          () =>
+            emit({
+              type: EventType.AgentHandoff,
+              workflowId,
+              from,
+              to,
+              reason,
+            }),
+          { name: `handoff-${call.toolCallId}` },
+        );
+        currentAgent = agents[to] ?? currentAgent;
+        turnMessages.push(
+          toolResultMessage(call, { ok: true, handedOffTo: to }),
+        );
+      } else {
+        const output = await DBOS.runStep(() => toolStep(workflowId, call), {
+          name: `tool-${call.toolCallId}`,
+        });
+        turnMessages.push(toolResultMessage(call, output as JSONValue));
+      }
     }
 
     turns.push(turnMessages);

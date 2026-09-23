@@ -1,24 +1,6 @@
-// What the agent is told to do. Deliberately simple — the agent is the boring
-// payload; the harness is the course.
-export const SYSTEM_PROMPT = `You are a support triage agent.
-
-For each work item the user gives you:
-1. Classify it with classifyItem.
-2. If the item needs data lookup or math (e.g. a billing dispute), write a
-   program with runCode to fetch and analyze the data — don't try to do the
-   arithmetic in your head. Inside runCode you can call tools.getCharges and
-   tools.searchKnowledgeBase.
-3. Draft a reply with draftReply, using anything runCode computed.
-4. Send the reply with sendReply.
-
-Handle the items one at a time — finish all four steps for an item before
-starting the next. When every item is done, briefly summarize what you did.`;
-
-// A sample task to try. The billing item
-// is the one that pushes the agent into Code Mode.
-export const SAMPLE_TASK = `Handle these work items:
-- item-1 (billing): Customer cus_88121 says they were charged twice. Find the duplicate charge and tell them the exact refund amount (in dollars).
-- item-2 (bug_report): "The export button fails on Safari."
-- item-3 (sales): "Can you send pricing for 50 seats?"
-- item-4 (technical): "I can't log in after resetting my password."
-- item-5 (billing): "When will my refund post?"`;
+// Agent prompts now live in agents.ts (one per agent). This file just holds a
+// sample task to try.
+//
+// A single refund request: triage will recognize it can't issue refunds and
+// hand off to the billing specialist.
+export const SAMPLE_TASK = `Customer cus_88121 says they were charged twice and wants the duplicate charge refunded. Sort it out.`;
